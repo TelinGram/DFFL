@@ -192,6 +192,20 @@ jobs:
             cp -r "$BACKUP_DIR"/* downloads/
           fi
 
+      # مرحله‌ی جدید: چک کردن اینکه حداقل یک فایل در downloads/ (غیر از README.md) وجود داشته باشد
+      - name: Verify at least one file was downloaded
+        run: |
+          # هر فایلی به جز README.md را بشمار
+          FILE_COUNT=$(find downloads -type f ! -name "README.md" 2>/dev/null | wc -l)
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "❌ هیچ فایلی با موفقیت دانلود نشد. پوشه‌ی دانلود کاملاً خالی است."
+            echo "لطفاً لینک‌ها را بررسی کنید (مستقیم بودن، در دسترس بودن و ... دقت کنید)."
+            exit 1
+          fi
+          echo "✅ تعداد فایل(های) دانلود شده: $FILE_COUNT"
+          # محتویات را هم نمایش بده تا در لاگ دیده شود
+          find downloads -type f ! -name "README.md" -exec ls -lh {} \;
+
       - name: Commit and push download files
         run: |
           git add downloads/ || true
