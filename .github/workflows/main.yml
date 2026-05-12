@@ -1,0 +1,203 @@
+name: ⬇️ 01- Download File
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'لینک‌های دانلود (با فاصله جدا کنید)'
+        required: true
+        type: string
+      mode:
+        description: 'حالت دانلود'
+        required: false
+        default: 'normal'
+        type: choice
+        options:
+          - normal
+          - zip
+      password:
+        description: 'رمز عبور برای فایل زیپ (اختیاری)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  download:
+    name: "📥 دانلود فایل"
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check URL provided
+        run: |
+          if [ -z "${{ github.event.inputs.urls }}" ]; then
+            echo "❌ لینک دانلود وارد نشده است!"
+            exit 1
+          fi
+          echo "✅ لینک دریافت شد"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config --global http.postBuffer 524288000
+          git config --global http.maxRequestBuffer 100M
+          git config --global core.compression 0
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+      - name: Install aria2 and zip
+        run: sudo apt-get update && sudo apt-get install -y aria2 zip curl bc
+
+      - name: Download files
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          URLS="${{ github.event.inputs.urls }}"
+          ZIP_PASSWORD="${{ github.event.inputs.password }}"
+          SPLIT_THRESHOLD_MB=90
+          SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
+
+          mkdir -p downloads tmp_downloads
+          BACKUP_DIR="/tmp/download_backup_$$"
+          mkdir -p "$BACKUP_DIR"
+
+          # --- Download function ---
+          download_with_retry() {
+            local URL="$1"
+            local FILENAME="$2"
+            local MAX_RETRIES=3
+            local RETRY_DELAY=5
+            local SUCCESS=false
+            rm -f "tmp_downloads/$FILENAME" "tmp_downloads/$FILENAME.aria2"
+
+            for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
+              echo "Attempt $attempt / $MAX_RETRIES for $FILENAME"
+              rm -f "tmp_downloads/$FILENAME" "tmp_downloads/$FILENAME.aria2"
+              aria2c --split=2 --max-connection-per-server=2 --min-split-size=20M \
+                     --max-tries=3 --retry-wait=5 --timeout=60 --connect-timeout=30 \
+                     --check-certificate=false --allow-overwrite=true \
+                     --auto-file-renaming=false --dir="tmp_downloads" --out="$FILENAME" "$URL" 2>&1
+
+              if [ -f "tmp_downloads/$FILENAME" ] && [ -s "tmp_downloads/$FILENAME" ]; then
+                local FILE_SIZE=$(stat -c%s "tmp_downloads/$FILENAME" 2>/dev/null || echo "0")
+                if [ "$FILE_SIZE" -gt 0 ]; then
+                  SUCCESS=true
+                  echo "✅ Downloaded: $FILENAME (${FILE_SIZE} bytes)"
+                  break
+                fi
+              fi
+
+              echo "aria2c failed, trying curl fallback..."
+              rm -f "tmp_downloads/$FILENAME"
+              curl -L -f -# --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 3600 \
+                   -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                   -o "tmp_downloads/$FILENAME" "$URL" 2>&1
+
+              if [ -f "tmp_downloads/$FILENAME" ] && [ -s "tmp_downloads/$FILENAME" ]; then
+                local FILE_SIZE=$(stat -c%s "tmp_downloads/$FILENAME" 2>/dev/null || echo "0")
+                if [ "$FILE_SIZE" -gt 0 ]; then
+                  SUCCESS=true
+                  echo "✅ curl downloaded: $FILENAME (${FILE_SIZE} bytes)"
+                  break
+                fi
+              fi
+
+              echo "❌ Attempt $attempt failed. Retrying in ${RETRY_DELAY}s..."
+              sleep $RETRY_DELAY
+              RETRY_DELAY=$((RETRY_DELAY * 2))
+            done
+
+            if [ "$SUCCESS" = true ]; then
+              return 0
+            else
+              rm -f "tmp_downloads/$FILENAME"
+              return 1
+            fi
+          }
+
+          # --- Process each URL ---
+          for URL in $URLS; do
+            FILENAME=$(basename "$URL" | sed 's/%20/ /g' | sed 's/[?#].*//')
+            FILENAME=$(echo "$FILENAME" | sed 's/[<>:"|?*]/_/g')
+            echo "⬇️ Downloading $URL -> $FILENAME"
+            download_with_retry "$URL" "$FILENAME" || echo "❌ Failed to download: $FILENAME"
+          done
+
+          # --- Zip mode ---
+          if [ "$MODE" = "zip" ]; then
+            if [ -n "$(ls -A tmp_downloads 2>/dev/null)" ]; then
+              ARCHIVE_NAME="archive_$(date +%Y%m%d_%H%M%S)"
+              FOLDER_NAME="${ARCHIVE_NAME}"
+              mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
+              VALID_FILES=()
+              for f in tmp_downloads/*; do
+                if [ -f "$f" ] && [ -s "$f" ]; then
+                  VALID_FILES+=("$f")
+                fi
+              done
+              if [ ${#VALID_FILES[@]} -gt 0 ]; then
+                ARCHIVE_PATH="$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.zip"
+                if [ -n "$ZIP_PASSWORD" ]; then
+                  zip -j -P "${ZIP_PASSWORD}" -s ${SPLIT_THRESHOLD_MB}m "${ARCHIVE_PATH}" "${VALID_FILES[@]}"
+                else
+                  zip -j -s ${SPLIT_THRESHOLD_MB}m "${ARCHIVE_PATH}" "${VALID_FILES[@]}"
+                fi
+                echo "✅ Archive created in $BACKUP_DIR/$FOLDER_NAME"
+              fi
+            fi
+            rm -rf tmp_downloads
+          else
+            # --- Normal mode (each file separately) ---
+            for FILE in tmp_downloads/*; do
+              [ -f "$FILE" ] || continue
+              if [ ! -s "$FILE" ]; then
+                rm -f "$FILE"
+                continue
+              fi
+              SIZE=$(stat -c%s "$FILE")
+              BASENAME=$(basename "$FILE")
+              BASENAME_NO_EXT="${BASENAME%.*}"
+              FOLDER_NAME="${BASENAME_NO_EXT}"
+              mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
+
+              if [ "$SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
+                echo "📦 $BASENAME is $(( SIZE / 1024 / 1024 ))MB - splitting into ${SPLIT_THRESHOLD_MB}MB parts"
+                ARCHIVE_BASE="$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}"
+                if [ -n "$ZIP_PASSWORD" ]; then
+                  zip -j -P "${ZIP_PASSWORD}" -s ${SPLIT_THRESHOLD_MB}m "${ARCHIVE_BASE}.zip" "$FILE"
+                else
+                  zip -j -s ${SPLIT_THRESHOLD_MB}m "${ARCHIVE_BASE}.zip" "$FILE"
+                fi
+              else
+                echo "📦 $BASENAME - creating zip"
+                if [ -n "$ZIP_PASSWORD" ]; then
+                  zip -j -P "${ZIP_PASSWORD}" "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.zip" "$FILE"
+                else
+                  zip -j "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.zip" "$FILE"
+                fi
+              fi
+              rm -f "$FILE"
+            done
+            rm -rf tmp_downloads
+          fi
+
+          # --- Move to repository download folder ---
+          if [ -d "$BACKUP_DIR" ] && [ "$(ls -A $BACKUP_DIR 2>/dev/null)" ]; then
+            cp -r "$BACKUP_DIR"/* downloads/
+          fi
+
+      - name: Commit and push download files
+        run: |
+          git add downloads/ || true
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "📥 Downloaded files [skip ci]"
+          git push
