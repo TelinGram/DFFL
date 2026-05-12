@@ -52,8 +52,17 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
-      - name: Install aria2 and zip
-        run: sudo apt-get update && sudo apt-get install -y aria2 zip curl bc
+      - name: Install tools and fix SSL certificates
+        run: |
+          echo "🔧 در حال بروزرسانی لیست بسته‌ها و نصب ابزارها..."
+          sudo apt-get update
+          sudo apt-get install -y aria2 zip curl bc wget ca-certificates
+          echo "🔄 در حال بروزرسانی گواهی‌نامه‌های امنیتی..."
+          sudo update-ca-certificates --fresh
+          echo "⏰ در حال تنظیم ساعت سیستم..."
+          sudo timedatectl set-ntp true
+          sudo timedatectl set-timezone UTC
+          echo "✅ ابزارها و تنظیمات اولیه با موفقیت انجام شد."
 
       - name: Download files
         run: |
@@ -67,7 +76,7 @@ jobs:
           BACKUP_DIR="/tmp/download_backup_$$"
           mkdir -p "$BACKUP_DIR"
 
-          # --- Download function ---
+          # --- Download function with THREE fallback methods ---
           download_with_retry() {
             local URL="$1"
             local FILENAME="$2"
@@ -78,6 +87,9 @@ jobs:
 
             for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
               echo "Attempt $attempt / $MAX_RETRIES for $FILENAME"
+
+              # Method 1: aria2c with SSL checks disabled
+              echo "⬇️ Trying aria2c..."
               rm -f "tmp_downloads/$FILENAME" "tmp_downloads/$FILENAME.aria2"
               aria2c --split=2 --max-connection-per-server=2 --min-split-size=20M \
                      --max-tries=3 --retry-wait=5 --timeout=60 --connect-timeout=30 \
@@ -88,14 +100,16 @@ jobs:
                 local FILE_SIZE=$(stat -c%s "tmp_downloads/$FILENAME" 2>/dev/null || echo "0")
                 if [ "$FILE_SIZE" -gt 0 ]; then
                   SUCCESS=true
-                  echo "✅ Downloaded: $FILENAME (${FILE_SIZE} bytes)"
+                  echo "✅ aria2c Downloaded: $FILENAME (${FILE_SIZE} bytes)"
                   break
                 fi
               fi
 
-              echo "aria2c failed, trying curl fallback..."
+              # Method 2: curl with SSL verification disabled (-k)
+              echo "⬇️ Trying curl with SSL check disabled..."
               rm -f "tmp_downloads/$FILENAME"
-              curl -L -f -# --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 3600 \
+              curl -L -k -# --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 3600 \
+                   -H "Accept: application/octet-stream" \
                    -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
                    -o "tmp_downloads/$FILENAME" "$URL" 2>&1
 
@@ -103,7 +117,23 @@ jobs:
                 local FILE_SIZE=$(stat -c%s "tmp_downloads/$FILENAME" 2>/dev/null || echo "0")
                 if [ "$FILE_SIZE" -gt 0 ]; then
                   SUCCESS=true
-                  echo "✅ curl downloaded: $FILENAME (${FILE_SIZE} bytes)"
+                  echo "✅ curl Downloaded: $FILENAME (${FILE_SIZE} bytes)"
+                  break
+                fi
+              fi
+
+              # Method 3: wget as last resort
+              echo "⬇️ Trying wget as final fallback..."
+              rm -f "tmp_downloads/$FILENAME"
+              wget --no-check-certificate --tries=3 --timeout=60 \
+                   -U "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                   -O "tmp_downloads/$FILENAME" "$URL" 2>&1
+
+              if [ -f "tmp_downloads/$FILENAME" ] && [ -s "tmp_downloads/$FILENAME" ]; then
+                local FILE_SIZE=$(stat -c%s "tmp_downloads/$FILENAME" 2>/dev/null || echo "0")
+                if [ "$FILE_SIZE" -gt 0 ]; then
+                  SUCCESS=true
+                  echo "✅ wget Downloaded: $FILENAME (${FILE_SIZE} bytes)"
                   break
                 fi
               fi
