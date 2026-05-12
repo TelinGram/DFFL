@@ -1,0 +1,46 @@
+name: 🧹 03- Clean downloads folder
+
+on:
+  workflow_dispatch:
+    inputs:
+      warning:
+        description: '⚠️ با اجرای این workflow تمام فایل‌های دانلود شده پاک می‌شوند. مطمئنید؟'
+        required: false
+        default: 'Read this warning before proceeding'
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+      - name: Clean and recreate downloads folder
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          echo "🧹 Cleaning downloads folder..."
+          if [ -d "downloads" ]; then
+            git rm -rf downloads/ 2>/dev/null || true
+            rm -rf downloads/ 2>/dev/null || true
+          fi
+          mkdir -p downloads
+          printf '## empty\nfor start go Action tab and use left side workflows\n' > downloads/README.md
+          git add -f downloads/README.md
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "🧹 Clean downloads folder [skip ci]"
+          git push
